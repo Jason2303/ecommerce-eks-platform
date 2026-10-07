@@ -1,0 +1,38 @@
+# redis: only gateway and product-service may connect; no outbound calls.
+# Safe to apply on its own: it includes its own DNS rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis
+  namespace: atlas-market
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # From gateway (rate limit) and product-service (cache)
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+        - podSelector:
+            matchLabels:
+              app: product-service
+      ports:
+        - protocol: TCP
+          port: 6379
+  egress:
+    # DNS lookups (Service names -> IPs)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

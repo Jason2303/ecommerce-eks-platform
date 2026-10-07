@@ -1,0 +1,19 @@
+# Non-secret settings shared by the app. The password lives in the Secret.
+# Hostnames are Service names: Kubernetes DNS resolves them inside the namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: atlas-config
+  namespace: atlas-market
+data:
+  PGHOST: "postgres"
+  PGPORT: "5432"
+  PGUSER: "shop"
+  PGDATABASE: "shop"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  PRODUCT_SERVICE_URL: "http://product-service:3001"
+  ORDER_SERVICE_URL: "http://order-service:3002"
+  GATEWAY_URL: "http://gateway:3000"
+  CACHE_TTL_SECONDS: "30"
+  RATE_LIMIT_PER_MIN: "600"

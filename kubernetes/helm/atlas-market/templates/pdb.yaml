@@ -1,0 +1,18 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# A node drain always leaves at least one copy of each app running
+{{- range $name := list "frontend" "gateway" "product-service" "order-service" }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "atlas.labels" $ | nindent 4 }}
+spec:
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,30 @@
+# Values for the ingress-nginx Helm chart.
+# Kubernetes asks AWS for a Network Load Balancer in the public subnets
+# (the ones Terraform tagged kubernetes.io/role/elb = 1).
+controller:
+  replicaCount: 2
+
+  # One controller per AZ.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+          app.kubernetes.io/component: controller
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+  service:
+    # Keep the real client IP (the gateway's rate limit uses it).
+    externalTrafficPolicy: Local
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+      # Kubernetes creates the NLB, so Terraform's default_tags do not reach it.
+      service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: "Project=atlas-market,Environment=prod,Owner=jason,ManagedBy=kubernetes"

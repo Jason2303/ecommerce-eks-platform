@@ -1,0 +1,9 @@
+Atlas Market {{ .Values.image.tag }} installed in namespace {{ .Release.Namespace }}.
+
+Watch the Pods come up:
+  kubectl -n {{ .Release.Namespace }} get pods -w
+
+Find the public address (NLB created by ingress-nginx):
+  kubectl -n {{ .Values.networkPolicies.ingressNamespace }} get svc ingress-nginx-controller
+
+Network policies are {{ if .Values.networkPolicies.enabled }}ON{{ else }}OFF (turn on with --set networkPolicies.enabled=true){{ end }}.

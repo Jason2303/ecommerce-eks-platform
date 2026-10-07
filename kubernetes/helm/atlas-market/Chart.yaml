@@ -1,0 +1,6 @@
+apiVersion: v2
+name: atlas-market
+description: Atlas Market e-commerce app (frontend, gateway, product-service, order-service, Postgres, Redis)
+type: application
+version: 0.1.0
+appVersion: "v1.0.0"

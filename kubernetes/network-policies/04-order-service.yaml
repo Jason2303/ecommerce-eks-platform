@@ -1,0 +1,51 @@
+# order-service: called by gateway; calls product-service and postgres.
+# Safe to apply on its own: it includes its own DNS rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: order-service
+  namespace: atlas-market
+spec:
+  podSelector:
+    matchLabels:
+      app: order-service
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # From gateway
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 3002
+  egress:
+    # To product-service (stock reservation)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: product-service
+      ports:
+        - protocol: TCP
+          port: 3001
+    # To postgres
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # DNS lookups (Service names -> IPs)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

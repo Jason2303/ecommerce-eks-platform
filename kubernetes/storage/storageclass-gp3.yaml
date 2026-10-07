@@ -1,0 +1,18 @@
+# Default storage for PersistentVolumeClaims: encrypted gp3 EBS disks.
+# WaitForFirstConsumer: the disk is created in the same AZ as the Pod that uses it
+# (EBS disks cannot move between AZs).
+# Delete: the disk is removed when its claim is deleted (no orphaned volumes).
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+parameters:
+  type: gp3
+  fsType: ext4
+  encrypted: "true"

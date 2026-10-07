@@ -1,0 +1,81 @@
+# Atlas Market chart settings. Override any of these with --set or -f.
+
+# One tag for all four app images: atlas201/shop-<service>:<tag>
+image:
+  repository: atlas201
+  tag: v1.0.0
+  pullPolicy: IfNotPresent
+
+# The Postgres password is NOT in the chart. Create this Secret first:
+#   kubectl -n atlas-market create secret generic atlas-db --from-literal=password='...'
+database:
+  secretName: atlas-db
+  secretKey: password
+  user: shop
+  name: shop
+
+# Plain settings that go into the ConfigMap
+config:
+  cacheTtlSeconds: "30"
+  rateLimitPerMin: "600"   # set to "0" during the load test
+
+# Default gp3 StorageClass (cluster-wide). Set create: false if it already exists.
+storageClass:
+  create: true
+  name: gp3
+
+frontend:
+  replicas: 2
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+
+# The three Node.js services. Names must stay as they are: the app finds
+# the others by these Service names.
+backend:
+  gateway:
+    port: 3000
+    usesDatabase: false
+    replicas: 2
+    autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 5, targetCPU: 70 }
+  product-service:
+    port: 3001
+    usesDatabase: true
+    replicas: 2
+    autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 5, targetCPU: 70 }
+  order-service:
+    port: 3002
+    usesDatabase: true
+    replicas: 2
+    autoscaling: { enabled: false, minReplicas: 2, maxReplicas: 5, targetCPU: 70 }
+
+backendResources:
+  requests: { cpu: 50m, memory: 96Mi }
+  limits: { cpu: 300m, memory: 256Mi }
+
+postgres:
+  image: postgres:16-alpine
+  storage: 5Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+redis:
+  image: redis:7-alpine
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+
+ingress:
+  enabled: true
+  className: nginx
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Off for the first install; turn on once the app works:
+#   helm upgrade ... --set networkPolicies.enabled=true
+networkPolicies:
+  enabled: false
+  ingressNamespace: ingress-nginx

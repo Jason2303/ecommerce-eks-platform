@@ -1,0 +1,12 @@
+# Namespace for the whole app.
+# Pod Security "restricted": Kubernetes rejects any Pod that runs as root,
+# can escalate privileges, or keeps Linux capabilities.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: atlas-market
+  labels:
+    app.kubernetes.io/part-of: atlas-market
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted

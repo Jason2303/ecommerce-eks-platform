@@ -1,0 +1,20 @@
+# Non-secret settings shared by the app.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: atlas-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "atlas.labels" . | nindent 4 }}
+data:
+  PGHOST: "postgres"
+  PGPORT: "5432"
+  PGUSER: {{ .Values.database.user | quote }}
+  PGDATABASE: {{ .Values.database.name | quote }}
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  PRODUCT_SERVICE_URL: "http://product-service:{{ (index .Values.backend "product-service").port }}"
+  ORDER_SERVICE_URL: "http://order-service:{{ (index .Values.backend "order-service").port }}"
+  GATEWAY_URL: "http://gateway:{{ .Values.backend.gateway.port }}"
+  CACHE_TTL_SECONDS: {{ .Values.config.cacheTtlSeconds | quote }}
+  RATE_LIMIT_PER_MIN: {{ .Values.config.rateLimitPerMin | quote }}

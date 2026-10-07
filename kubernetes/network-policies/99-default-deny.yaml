@@ -1,0 +1,35 @@
+# Apply LAST, after the 6 component policies are in and the app still works.
+# 1) Deny all traffic to and from every Pod in the namespace by default,
+#    so anything not explicitly allowed above (e.g. a new Pod) is blocked.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: atlas-market
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# 2) ...except DNS, which every Pod needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: atlas-market
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    # DNS lookups (Service names -> IPs)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

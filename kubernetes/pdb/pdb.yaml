@@ -1,0 +1,44 @@
+# Voluntary disruptions (node drain, upgrade) must always leave 1 Pod running.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: atlas-market
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: frontend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway
+  namespace: atlas-market
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: gateway
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: product-service
+  namespace: atlas-market
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: product-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order-service
+  namespace: atlas-market
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: order-service

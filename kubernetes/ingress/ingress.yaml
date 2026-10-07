@@ -1,0 +1,28 @@
+# Public entry point. ingress-nginx (installed with Helm) sits behind an AWS NLB.
+#   /api/... -> gateway
+#   /...     -> frontend
+# No host rule, so it answers on the NLB's own DNS name.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: atlas-market
+  namespace: atlas-market
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 3000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 8080

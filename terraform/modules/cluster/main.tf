@@ -108,6 +108,15 @@ resource "aws_eks_addon" "cloudwatch_observability" {
 
   cluster_name = module.eks.cluster_name
   addon_name   = "amazon-cloudwatch-observability"
+  configuration_values = jsonencode({
+    manager = {
+      applicationSignals = {
+        autoMonitor = {
+          monitorAllServices = false
+        }
+      }
+    }
+  })
 
   pod_identity_association {
     role_arn        = module.cloudwatch_pod_identity[0].iam_role_arn
