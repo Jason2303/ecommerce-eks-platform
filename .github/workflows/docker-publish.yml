@@ -85,10 +85,16 @@ jobs:
             --severity CRITICAL --ignore-unfixed --exit-code 1 \
             local/${{ matrix.service }}:ci
 
-      # Push to Docker Hub 
+      # Push to Docker Hub
       - name: Push
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: ecommerce-application/services/${{ matrix.service }}
-          platforms:
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.service }}
