@@ -1,0 +1,46 @@
+x-hardened: &hardened
+  restart: always
+  security_opt:
+    - no-new-privileges:true   
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"          
+      max-file: "3"
+
+services:
+  frontend:
+    <<: *hardened
+    image: ${DOCKERHUB_USERNAME}/shop-frontend:${TAG:?Set TAG to a release, e.g. v1.0.0}
+    pull_policy: always
+    cap_drop: [ALL]            
+
+  gateway:
+    <<: *hardened
+    image: ${DOCKERHUB_USERNAME}/shop-gateway:${TAG:?Set TAG to a release, e.g. v1.0.0}
+    pull_policy: always
+    cap_drop: [ALL]
+    read_only: true            
+    tmpfs: [/tmp]
+
+  product-service:
+    <<: *hardened
+    image: ${DOCKERHUB_USERNAME}/shop-product-service:${TAG:?Set TAG to a release, e.g. v1.0.0}
+    pull_policy: always
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+
+  order-service:
+    <<: *hardened
+    image: ${DOCKERHUB_USERNAME}/shop-order-service:${TAG:?Set TAG to a release, e.g. v1.0.0}
+    pull_policy: always
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+
+  postgres:
+    <<: *hardened
+
+  redis:
+    <<: *hardened

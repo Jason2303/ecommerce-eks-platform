@@ -1,0 +1,94 @@
+name: docker-publish
+
+# push to main  -> :latest + :sha-xxxxxxx
+# push tag v*   -> :vX.Y.Z (tag name, v included)
+# pull request  -> build, size check and scan only, nothing pushed
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  MAX_IMAGE_MB: 150
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [frontend, gateway, product-service, order-service]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Log in (skipped for pull requests)
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Work out tags: v1.0.0, latest, sha-xxxxxxx
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/shop-${{ matrix.service }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+
+      # Build and keep it locally so it can be checked
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: ecommerce-application/services/${{ matrix.service }}
+          platforms: linux/amd64
+          load: true
+          tags: local/${{ matrix.service }}:ci
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      # Fail if over 150 MB or running as root
+      - name: Check size and user
+        run: |
+          IMAGE=local/${{ matrix.service }}:ci
+          BYTES=$(docker image inspect "$IMAGE" --format '{{.Size}}')
+          MB=$((BYTES / 1024 / 1024))
+          USER_ID=$(docker image inspect "$IMAGE" --format '{{.Config.User}}')
+          echo "### ${{ matrix.service }}: ${MB} MB, user ${USER_ID}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Size: ${MB} MB (limit ${MAX_IMAGE_MB})  User: ${USER_ID}"
+          [ "$MB" -le "$MAX_IMAGE_MB" ] || { echo "Image is over ${MAX_IMAGE_MB} MB"; exit 1; }
+          case "$USER_ID" in ""|0|root|0:*|root:*) echo "Image runs as root"; exit 1;; esac
+
+      # Security scan: show HIGH + CRITICAL
+      - name: Trivy scan
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.65.0 image --no-progress \
+            --severity HIGH,CRITICAL --format table --exit-code 0 \
+            local/${{ matrix.service }}:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.65.0 image --no-progress --quiet \
+            --severity CRITICAL --ignore-unfixed --exit-code 1 \
+            local/${{ matrix.service }}:ci
+
+      # Push to Docker Hub 
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ecommerce-application/services/${{ matrix.service }}
+          platforms:

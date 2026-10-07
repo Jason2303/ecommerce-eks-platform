@@ -1,0 +1,18 @@
+{
+  "name": "shop-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Atlas Market gateway",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "express": "^4.22.3",
+    "ioredis": "^5.11.1"
+  }
+}

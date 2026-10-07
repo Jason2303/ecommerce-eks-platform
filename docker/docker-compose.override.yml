@@ -1,0 +1,32 @@
+services:
+  frontend:
+    build:
+      context: ../ecommerce-application/services/frontend
+
+  gateway:
+    build:
+      context: ../ecommerce-application/services/gateway
+      args:
+        APP_VERSION: ${TAG}
+    ports:
+      - "127.0.0.1:${GATEWAY_DEBUG_PORT}:${GATEWAY_PORT}"
+    environment:
+      RATE_LIMIT_PER_MIN: "0"  
+      SHUTDOWN_DELAY_MS: "0"    
+
+  product-service:
+    build:
+      context: ../ecommerce-application/services/product-service
+      args:
+        APP_VERSION: ${TAG}
+    environment:
+      CACHE_TTL_SECONDS: "5"    
+      SHUTDOWN_DELAY_MS: "0"
+
+  order-service:
+    build:
+      context: ../ecommerce-application/services/order-service
+      args:
+        APP_VERSION: ${TAG}
+    environment:
+      SHUTDOWN_DELAY_MS: "0"

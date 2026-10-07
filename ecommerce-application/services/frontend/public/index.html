@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlas Market</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧭</text></svg>">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">Atlas<span>Market</span></a>
+    <nav>
+      <a href="#/" data-nav="shop">Shop</a>
+      <a href="#/orders" data-nav="orders">Orders</a>
+      <button class="cart-btn" id="cart-open" type="button" aria-label="Open cart">
+        Cart <span class="badge" id="cart-count">0</span>
+      </button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="view-shop" class="view">
+      <div class="hero">
+        <h1>Good things, made to last.</h1>
+        <p>A small catalogue of kitchen, desk and outdoor goods.</p>
+      </div>
+      <div class="filters" id="filters" role="tablist"></div>
+      <div class="grid" id="products"><p class="muted">Loading products…</p></div>
+    </section>
+
+    <section id="view-orders" class="view" hidden>
+      <div class="section-head">
+        <h1>Recent orders</h1>
+        <button class="ghost" id="orders-refresh" type="button">Refresh</button>
+      </div>
+      <div id="orders"><p class="muted">Loading orders…</p></div>
+    </section>
+  </main>
+
+  <aside class="drawer" id="cart" aria-hidden="true">
+    <div class="drawer-panel" role="dialog" aria-label="Cart">
+      <div class="drawer-head">
+        <h2>Your cart</h2>
+        <button class="icon" id="cart-close" type="button" aria-label="Close cart">✕</button>
+      </div>
+      <div id="cart-body"></div>
+    </div>
+  </aside>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <footer class="footer">
+    <span id="status-gateway">gateway: checking…</span>
+    <span id="status-cache"></span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

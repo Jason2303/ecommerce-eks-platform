@@ -1,0 +1,2 @@
+# Copy to backend.hcl and put in the bucket name from terraform/bootstrap output
+bucket = "atlas-tfstate-<account-id>"

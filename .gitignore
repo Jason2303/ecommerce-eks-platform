@@ -1,0 +1,24 @@
+# Secrets
+.env
+**/secret.yaml
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Terraform 
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+*.auto.tfvars
+backend.hcl
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Local Redis dumps
+*.rdb
