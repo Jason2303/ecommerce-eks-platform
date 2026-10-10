@@ -1,6 +1,6 @@
 # Atlas Market: E-commerce Platform on AWS
 
-**Live (VPS):** https://atlasmarket.duckdns.org
+**VPS deployment:** ran at https://atlasmarket.duckdns.org with a Let's Encrypt certificate. Torn down after review to avoid cost. Screenshots are in [Testing evidence](#testing-evidence).
 
 Atlas Market is a simple e-commerce web application where you can browse products, check stock and place orders. It consists of 4 microservices working together, backed by Postgres and Redis.
 
@@ -320,7 +320,9 @@ Tags: `vX.Y.Z` (immutable release, used for every deployment), `sha-<commit>` (t
 | Kubernetes | Rolling update with helm upgrade, rollback, history                    | [helm side](images/k8s-images/rollout-window2.png)                                                                                                                   |
 | Kubernetes | HPA, PDBs, 8 NetworkPolicies (allowed call ok, blocked call times out) | [scaling and safety](images/k8s-images/scaling-safety.png)                                                                                                           |
 | Kubernetes | Everything destroyed (81 of 81)                                        | [cleanup](images/k8s-images/cleanup.png)                                                                                                                             |
-| VPS        | Live HTTPS with a Let's Encrypt certificate                            | https://atlasmarket.duckdns.org                                                                                                                                      |
+| VPS | HTTPS with a valid Let's Encrypt certificate | [browser](images/vps-images/vps-secure-connection.png) |
+| VPS | 6 containers healthy, certificate, http to https redirect (301), renewal dry run | [server](images/vps-images/server.png) |
+| VPS | Torn down (9 of 9 destroyed) | `terraform destroy` in `terraform/envs/vps` |
 
 ---
 
@@ -372,6 +374,8 @@ cd terraform\envs\vps ; terraform destroy
 | VPS      | about $0.03/hr | t3.small, Elastic IP, 20 GB gp3                            |
 
 EKS was brought up only for testing sessions and destroyed the same day. The NAT gateways are the biggest fixed cost, which is why dev uses one and staging/prod use one per AZ.
+
+The VPS ran for about 13 hours for review then was destroyed.
 
 ---
 
