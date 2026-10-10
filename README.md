@@ -320,7 +320,7 @@ Tags: `vX.Y.Z` (immutable release, used for every deployment), `sha-<commit>` (t
 | Kubernetes | Rolling update with helm upgrade, rollback, history                    | [helm side](images/k8s-images/rollout-window2.png)                                                                                                                   |
 | Kubernetes | HPA, PDBs, 8 NetworkPolicies (allowed call ok, blocked call times out) | [scaling and safety](images/k8s-images/scaling-safety.png)                                                                                                           |
 | Kubernetes | Everything destroyed (81 of 81)                                        | [cleanup](images/k8s-images/cleanup.png)                                                                                                                             |
-| VPS | HTTPS with a valid Let's Encrypt certificate | [browser](images/vps-images/vps-secure-connection.png) |
+| VPS | HTTPS with a valid Let's Encrypt certificate | [browser](images/vps-images/secure-connection.png) |
 | VPS | 6 containers healthy, certificate, http to https redirect (301), renewal dry run | [server](images/vps-images/server.png) |
 | VPS | Torn down (9 of 9 destroyed) | `terraform destroy` in `terraform/envs/vps` |
 
