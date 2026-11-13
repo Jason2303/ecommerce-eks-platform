@@ -7,6 +7,9 @@
 const express = require('express');
 const { Pool } = require('pg');
 const { migrate } = require('./db');
+const {
+  client: prom, register, makeLogger, traceContext, traceparentFor, httpMetrics, metricsHandler, NOT_USER_TRAFFIC,
+} = require('./observability');
 
 const SERVICE = 'order-service';
 const VERSION = process.env.APP_VERSION || 'dev';
@@ -15,8 +18,27 @@ const PRODUCT_SERVICE_URL = (process.env.PRODUCT_SERVICE_URL || 'http://product-
 const SHUTDOWN_DELAY_MS = Number(process.env.SHUTDOWN_DELAY_MS || 5000);
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const log = (level, msg, extra = {}) =>
-  console.log(JSON.stringify({ time: new Date().toISOString(), level, service: SERVICE, msg, ...extra }));
+const log = makeLogger(SERVICE);
+
+// ---- business metrics ----
+const ordersTotal = new prom.Counter({
+  name: 'shop_orders_total',
+  help: 'Order attempts by outcome',
+  // placed | invalid (bad input) | rejected (out of stock / unknown product) | failed (our fault)
+  labelNames: ['result'],
+  registers: [register],
+});
+const revenueCents = new prom.Counter({
+  name: 'shop_revenue_cents_total',
+  help: 'Value of placed orders, in cents',
+  registers: [register],
+});
+const orderValue = new prom.Histogram({
+  name: 'shop_order_value_cents',
+  help: 'Distribution of placed order values, in cents',
+  buckets: [1000, 2500, 5000, 10000, 25000, 50000, 100000],
+  registers: [register],
+});
 
 const pool = new Pool({ max: 10, connectionTimeoutMillis: 5000 });
 pool.on('error', (err) => log('error', 'postgres pool error', { error: err.message }));
@@ -27,15 +49,18 @@ app.use(express.json({ limit: '32kb' }));
 
 let shuttingDown = false;
 
+app.use(traceContext);
+app.use(httpMetrics);
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
-    if (req.path === '/healthz' || req.path === '/readyz') return;
-    log('info', 'request', { method: req.method, path: req.originalUrl, status: res.statusCode, ms: Date.now() - start, requestId: req.get('x-request-id') });
+    if (NOT_USER_TRAFFIC.has(req.path)) return;
+    log(res.statusCode >= 500 ? 'error' : 'info', 'request', { method: req.method, path: req.originalUrl, status: res.statusCode, ms: Date.now() - start, requestId: req.get('x-request-id') });
   });
   next();
 });
 
+app.get('/metrics', metricsHandler);
 app.get('/healthz', (req, res) => res.json({ status: 'ok', service: SERVICE, version: VERSION }));
 
 // Readiness checks only this service's own database.
@@ -79,10 +104,14 @@ app.get('/orders/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-async function callProductService(path, body, requestId) {
+async function callProductService(path, body, req) {
   return fetch(`${PRODUCT_SERVICE_URL}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-request-id': requestId || '' },
+    headers: {
+      'content-type': 'application/json',
+      'x-request-id': req.get('x-request-id') || '',
+      traceparent: traceparentFor(req), // same trace continues in product-service
+    },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(5000),
   });
@@ -92,25 +121,32 @@ app.post('/orders', async (req, res, next) => {
   const { customer_name, customer_email, items } = req.body || {};
   const name = typeof customer_name === 'string' ? customer_name.trim() : '';
   const email = typeof customer_email === 'string' ? customer_email.trim() : '';
-  if (!name || name.length > 100) return res.status(400).json({ error: 'invalid_customer_name' });
-  if (!EMAIL_RE.test(email) || email.length > 200) return res.status(400).json({ error: 'invalid_customer_email' });
-  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'invalid_items' });
+  const invalid = (error) => {
+    ordersTotal.inc({ result: 'invalid' });
+    return res.status(400).json({ error });
+  };
+  if (!name || name.length > 100) return invalid('invalid_customer_name');
+  if (!EMAIL_RE.test(email) || email.length > 200) return invalid('invalid_customer_email');
+  if (!Array.isArray(items) || items.length === 0) return invalid('invalid_items');
 
   const requestId = req.get('x-request-id');
 
   // 1. Reserve stock (all or nothing) and get authoritative prices.
   let reserved;
   try {
-    const resp = await callProductService('/internal/reserve', { items }, requestId);
+    const resp = await callProductService('/internal/reserve', { items }, req);
     const body = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       // Pass 400 / 404 / 409 straight back so the shopper sees why.
       const status = [400, 404, 409].includes(resp.status) ? resp.status : 502;
+      ordersTotal.inc({ result: status === 502 ? 'failed' : 'rejected' });
+      if (status === 502) log('error', 'stock reservation failed', { upstreamStatus: resp.status, requestId });
       return res.status(status).json(body.error ? body : { error: 'reservation_failed' });
     }
     reserved = body.items;
   } catch (err) {
-    log('error', 'product-service unreachable', { error: err.message });
+    ordersTotal.inc({ result: 'failed' });
+    log('error', 'product-service unreachable', { error: err.message, requestId });
     return res.status(503).json({ error: 'product_service_unavailable' });
   }
 
@@ -133,6 +169,9 @@ app.post('/orders', async (req, res, next) => {
       );
     }
     await client.query('COMMIT');
+    ordersTotal.inc({ result: 'placed' });
+    revenueCents.inc(total);
+    orderValue.observe(total);
     log('info', 'order placed', { orderId, totalCents: total, requestId });
     res.status(201).json({
       id: orderId, customer_name: name, customer_email: email, status: 'confirmed',
@@ -141,9 +180,10 @@ app.post('/orders', async (req, res, next) => {
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
+    ordersTotal.inc({ result: 'failed' });
     // 3. Compensate: give the stock back.
     try {
-      await callProductService('/internal/release', { items: reserved.map(({ product_id, quantity }) => ({ product_id, quantity })) }, requestId);
+      await callProductService('/internal/release', { items: reserved.map(({ product_id, quantity }) => ({ product_id, quantity })) }, req);
     } catch (releaseErr) {
       log('error', 'stock release failed', { error: releaseErr.message, items: reserved });
     }
@@ -155,7 +195,7 @@ app.post('/orders', async (req, res, next) => {
 
 app.use((req, res) => res.status(404).json({ error: 'not_found' }));
 
-// eslint-disable-next-line no-unused-vars
+ 
 app.use((err, req, res, next) => {
   // Malformed JSON and oversized bodies come from express.json() with a 4xx status.
   if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: 'invalid_request_body' });
@@ -196,7 +236,11 @@ async function main() {
   process.on('SIGINT', shutdown);
 }
 
-main().catch((err) => {
-  log('error', 'startup failed', { error: err.message });
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    log('error', 'startup failed', { error: err.message });
+    process.exit(1);
+  });
+}
+
+module.exports = { app, pool };

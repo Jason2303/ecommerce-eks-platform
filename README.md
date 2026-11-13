@@ -2,6 +2,8 @@
 
 **VPS deployment:** ran at https://atlasmarket.duckdns.org with a Let's Encrypt certificate. Torn down after review to avoid cost. Screenshots are in [Testing evidence](#testing-evidence).
 
+> **Capstone 2: GitOps Platform with Monitoring.** CI (lint → test → build → scan → push → deploy) is in this repo; the GitOps desired state, ArgoCD apps, monitoring stack, alerts, dashboards and runbooks are in **[atlas-market-gitops](https://github.com/Jason2303/atlas-market-gitops)**.
+
 Atlas Market is a simple e-commerce web application where you can browse products, check stock and place orders. It consists of 4 microservices working together, backed by Postgres and Redis.
 
 The project shows how the application runs on AWS: Terraform manages the infrastructure across three environments (dev, staging and production), the containers are hardened and built through continuous integration, Kubernetes on EKS handles orchestration with Helm managing the manifests, and a single-server deployment on a VPS serves the app on a real domain with TLS.
@@ -16,7 +18,7 @@ EKS is used so that AWS manages the control plane and I can focus on the nodes a
 4. [Deploy to EKS](#deploy-to-eks)
 5. [Deploy to a VPS (nginx + Let's Encrypt)](#deploy-to-a-vps-nginx--lets-encrypt)
 6. [Run locally with Docker Compose](#run-locally-with-docker-compose)
-7. [CI/CD](#cicd)
+7. [CI/CD](#cicd) and [Observability](#observability-built-into-every-node-service)
 8. [Design decisions](#design-decisions)
 9. [Considered and rejected](#considered-and-rejected)
 10. [Testing evidence](#testing-evidence)
@@ -237,15 +239,35 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 ## CI/CD
 
-`.github/workflows/docker-publish.yml` builds the four images in a matrix and blocks the push if any gate fails:
+`.github/workflows/ci.yml`, on every push to `main` (pull requests run everything except push/deploy):
 
-1. **Build** (multi-stage, alpine runtime)
-2. **Size gate:** image under 150 MB
-3. **Non-root gate:** image user is a numeric non-zero UID
-4. **Trivy** vulnerability scan
-5. **Push** to Docker Hub `atlas201/shop-<service>`
+| # | Stage | Job | Gate |
+|---|---|---|---|
+| 1 | **Lint** | `lint-test` (matrix: gateway, product-service, order-service) | ESLint flat config, `--max-warnings=0` |
+| 2 | **Test** | `lint-test` | `node --test`: 20 unit tests (trace propagation, error paths, validation, metrics, JSON logs) |
+| 3 | **Build** | `build` (matrix: 4 images) | multi-stage, alpine runtime, GHA layer cache |
+| 4 | **Gates** | `build` | image < 150 MB, numeric non-root user |
+| 5 | **Scan** | `build` | Trivy: HIGH+CRITICAL reported, fixable CRITICAL fails the build |
+| 6 | **Push** | `build` | Docker Hub `atlas201/shop-<service>:sha-<commit>` (+ `vX.Y.Z` on tags) |
+| 7 | **Deploy to staging** | `update-config` | commits the new tag to [`atlas-market-gitops`](https://github.com/Jason2303/atlas-market-gitops) `envs/staging/values.yaml` with a write deploy key scoped to that repo; ArgoCD auto-syncs staging |
 
-Tags: `vX.Y.Z` (immutable release, used for every deployment), `sha-<commit>` (traceability), `latest` (convenience only, never deployed).
+Production is promoted from the config repo (gated PR + manual ArgoCD sync). See its README.
+If GitHub-hosted runners are unavailable, `scripts/local-ci.sh` runs the same stages locally and loads the images into kind.
+
+Tags: `sha-<commit>` (every main build, what GitOps deploys), `vX.Y.Z` (releases), `latest` (convenience only, never deployed).
+
+## Observability (built into every Node service)
+
+Shared module `src/observability.js` (one copy per service, because each image has its own build context):
+
+- **`/metrics`** (prom-client): `http_requests_total{method,route,status}` and `http_request_duration_seconds` per **route template**, Node.js runtime metrics, and business metrics: `shop_orders_total{result}`, `shop_revenue_cents_total`, `shop_order_value_cents`, `product_cache_requests_total{result}`, `product_stock_reservations_total{result}`, `product_stock_units{sku}`, `gateway_rate_limited_requests_total`, `gateway_upstream_errors_total{target,kind}`.
+- **Trace context:** W3C `traceparent` is accepted or started at the gateway, forwarded gateway → order-service → product-service, and returned as `X-Trace-Id`.
+- **Structured logs:** one JSON object per line; `trace_id` + `span_id` are added automatically to every line written during a request (AsyncLocalStorage), so one checkout can be followed across all services in Loki.
+- `/healthz` (liveness: process up), `/readyz` (readiness: own dependencies), `/metrics`: probe and scrape traffic is excluded from RED metrics and request logs.
+
+Verified end-to-end against real Postgres + Redis: one order produced log lines in gateway, order-service and product-service with the same `trace_id`, and moved `shop_orders_total`, `shop_revenue_cents_total` and `product_stock_units`.
+
+Prometheus, Loki, Grafana, alert rules (14), dashboards (4) and runbooks live in the config repo and are deployed by ArgoCD.
 
 ---
 
@@ -266,7 +288,14 @@ Tags: `vX.Y.Z` (immutable release, used for every deployment), `sha-<commit>` (t
 - Multi-stage builds on alpine keep images under 150 MB with only production dependencies.
 - Images run as a numeric non-root UID, because the kubelet can only verify `runAsNonRoot` when the user is a number (e.g 1001)
 - Exec-form `CMD` makes node PID 1, so it receives SIGTERM and finishes in-flight requests during a rollout.
-- Deployments always use an immutable version tag (`v1.0.0`), never `latest`.
+- Deployments always use an immutable tag (`vX.Y.Z` or `sha-<commit>`), never `latest`.
+
+**Observability and GitOps** (details and trade-offs: config repo README §7)
+
+- Metrics use the route *template* as a label, never the raw URL, so label cardinality stays bounded.
+- Trace context follows the W3C `traceparent` standard without a tracing backend yet: log correlation works today and Tempo/Jaeger can be added later without changing callers.
+- Lint and tests use ESLint + Node's built-in test runner. Tests run without Postgres/Redis by exercising every path decided before the database (validation, error handling, trace propagation, metrics).
+- CI deploys by committing to the config repo (deploy key scoped to that repo) instead of calling the cluster, so CI holds no cluster credentials.
 
 **Kubernetes**
 

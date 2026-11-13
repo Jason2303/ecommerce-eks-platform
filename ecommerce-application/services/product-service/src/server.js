@@ -7,6 +7,9 @@ const express = require('express');
 const { Pool } = require('pg');
 const Redis = require('ioredis');
 const { migrateAndSeed } = require('./db');
+const {
+  client: prom, register, makeLogger, traceContext, httpMetrics, metricsHandler, NOT_USER_TRAFFIC,
+} = require('./observability');
 
 const SERVICE = 'product-service';
 const VERSION = process.env.APP_VERSION || 'dev';
@@ -15,8 +18,7 @@ const CACHE_TTL_SECONDS = Number(process.env.CACHE_TTL_SECONDS || 30);
 const SHUTDOWN_DELAY_MS = Number(process.env.SHUTDOWN_DELAY_MS || 5000);
 const CACHE_KEY = 'products:all';
 
-const log = (level, msg, extra = {}) =>
-  console.log(JSON.stringify({ time: new Date().toISOString(), level, service: SERVICE, msg, ...extra }));
+const log = makeLogger(SERVICE);
 
 // Postgres connection comes from the standard PG* variables:
 // PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE
@@ -31,6 +33,7 @@ const redis = new Redis({
   enableOfflineQueue: false,
   maxRetriesPerRequest: 1,
   retryStrategy: (times) => Math.min(times * 200, 2000),
+  lazyConnect: process.env.NODE_ENV === 'test', // unit tests run without Redis
 });
 let redisWasReady = false;
 redis.on('ready', () => { redisWasReady = true; log('info', 'redis connected'); });
@@ -52,6 +55,35 @@ async function cacheDel(key) {
   try { await redis.del(key); } catch { /* cache is best effort */ }
 }
 
+// ---- business metrics ----
+const cacheRequests = new prom.Counter({
+  name: 'product_cache_requests_total',
+  help: 'Catalogue reads by cache result',
+  labelNames: ['result'], // hit | miss
+  registers: [register],
+});
+const stockReservations = new prom.Counter({
+  name: 'product_stock_reservations_total',
+  help: 'Stock reservation attempts from order-service',
+  labelNames: ['result'], // reserved | insufficient_stock | not_found | error
+  registers: [register],
+});
+// Read from Postgres at scrape time, so the gauge is always the real stock level.
+ 
+new prom.Gauge({
+  name: 'product_stock_units',
+  help: 'Units in stock per product (read from Postgres at scrape time)',
+  labelNames: ['sku', 'category'],
+  registers: [register],
+  async collect() {
+    try {
+      const { rows } = await pool.query('SELECT sku, category, stock FROM products');
+      this.reset();
+      for (const r of rows) this.set({ sku: r.sku, category: r.category }, r.stock);
+    } catch { /* database down: keep the last values, readiness/alerts cover the outage */ }
+  },
+});
+
 const PRODUCT_COLUMNS = 'id, sku, name, description, category, price_cents, stock, emoji, hue';
 
 const app = express();
@@ -60,15 +92,18 @@ app.use(express.json({ limit: '32kb' }));
 
 let shuttingDown = false;
 
+app.use(traceContext);
+app.use(httpMetrics);
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
-    if (req.path === '/healthz' || req.path === '/readyz') return;
-    log('info', 'request', { method: req.method, path: req.originalUrl, status: res.statusCode, ms: Date.now() - start, requestId: req.get('x-request-id') });
+    if (NOT_USER_TRAFFIC.has(req.path)) return;
+    log(res.statusCode >= 500 ? 'error' : 'info', 'request', { method: req.method, path: req.originalUrl, status: res.statusCode, ms: Date.now() - start, requestId: req.get('x-request-id') });
   });
   next();
 });
 
+app.get('/metrics', metricsHandler);
 app.get('/healthz', (req, res) => res.json({ status: 'ok', service: SERVICE, version: VERSION }));
 
 app.get('/readyz', async (req, res) => {
@@ -88,11 +123,13 @@ app.get('/products', async (req, res, next) => {
     if (cached) {
       products = JSON.parse(cached);
       res.set('X-Cache', 'HIT');
+      cacheRequests.inc({ result: 'hit' });
     } else {
       const { rows } = await pool.query(`SELECT ${PRODUCT_COLUMNS} FROM products ORDER BY category, name`);
       products = rows;
       await cacheSet(CACHE_KEY, JSON.stringify(rows));
       res.set('X-Cache', 'MISS');
+      cacheRequests.inc({ result: 'miss' });
     }
     const { category } = req.query;
     if (category) products = products.filter((p) => p.category === category);
@@ -141,7 +178,12 @@ app.post('/internal/reserve', async (req, res, next) => {
       if (!rows.length) {
         await client.query('ROLLBACK');
         const exists = await pool.query('SELECT stock FROM products WHERE id = $1', [product_id]);
-        if (!exists.rows.length) return res.status(404).json({ error: 'product_not_found', product_id });
+        if (!exists.rows.length) {
+          stockReservations.inc({ result: 'not_found' });
+          return res.status(404).json({ error: 'product_not_found', product_id });
+        }
+        stockReservations.inc({ result: 'insufficient_stock' });
+        log('warn', 'insufficient stock', { product_id, requested: quantity, available: exists.rows[0].stock });
         await cacheDel(CACHE_KEY); // the shopper saw a stale stock figure, refresh it
         return res.status(409).json({ error: 'insufficient_stock', product_id, available: exists.rows[0].stock });
       }
@@ -149,8 +191,10 @@ app.post('/internal/reserve', async (req, res, next) => {
     }
     await client.query('COMMIT');
     await cacheDel(CACHE_KEY);
+    stockReservations.inc({ result: 'reserved' });
     res.json({ items: reserved });
   } catch (err) {
+    stockReservations.inc({ result: 'error' });
     await client.query('ROLLBACK').catch(() => {});
     next(err);
   } finally {
@@ -173,7 +217,7 @@ app.post('/internal/release', async (req, res, next) => {
 
 app.use((req, res) => res.status(404).json({ error: 'not_found' }));
 
-// eslint-disable-next-line no-unused-vars
+ 
 app.use((err, req, res, next) => {
   // Malformed JSON and oversized bodies come from express.json() with a 4xx status.
   if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: 'invalid_request_body' });
@@ -216,7 +260,11 @@ async function main() {
   process.on('SIGINT', shutdown);
 }
 
-main().catch((err) => {
-  log('error', 'startup failed', { error: err.message });
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    log('error', 'startup failed', { error: err.message });
+    process.exit(1);
+  });
+}
+
+module.exports = { app, normaliseItems, pool, redis };

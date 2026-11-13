@@ -1,0 +1,179 @@
+name: ci
+
+# Pipeline: lint -> test -> build -> gates (size, non-root) -> Trivy scan -> push -> update config repo
+#
+#   pull request  -> lint, test, build, gates and scan only (nothing pushed, no deploy)
+#   push to main  -> everything; images tagged sha-<7> and latest; staging tag bumped in
+#                    the GitOps config repo, which ArgoCD auto-syncs to staging
+#   push tag v*   -> release images tagged vX.Y.Z (promotion to production stays manual)
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore: ["**.md", "images/**", "terraform/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  MAX_IMAGE_MB: 150
+  REGISTRY_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+
+jobs:
+  # ------------------------------------------------------------- 1+2. LINT & TEST
+  lint-test:
+    name: lint + test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [gateway, product-service, order-service]
+    defaults:
+      run:
+        working-directory: ecommerce-application/services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ecommerce-application/services/${{ matrix.service }}/package-lock.json
+      - run: npm ci
+      - name: Lint (ESLint, zero warnings)
+        run: npm run lint
+      - name: Unit tests (node:test)
+        run: npm test
+
+  # ------------------------------------------- 3+4. BUILD, GATES, SCAN, PUSH
+  build:
+    name: build + scan + push (${{ matrix.service }})
+    needs: lint-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [frontend, gateway, product-service, order-service]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Tags: vX.Y.Z (release), sha-xxxxxxx (every main commit), latest (convenience only)
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_USER }}/shop-${{ matrix.service }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: ecommerce-application/services/${{ matrix.service }}
+          platforms: linux/amd64
+          load: true
+          tags: local/${{ matrix.service }}:ci
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Gate - image size and non-root user
+        run: |
+          IMAGE=local/${{ matrix.service }}:ci
+          BYTES=$(docker image inspect "$IMAGE" --format '{{.Size}}')
+          MB=$((BYTES / 1024 / 1024))
+          USER_ID=$(docker image inspect "$IMAGE" --format '{{.Config.User}}')
+          echo "### ${{ matrix.service }}: ${MB} MB, user ${USER_ID}" >> "$GITHUB_STEP_SUMMARY"
+          [ "$MB" -le "$MAX_IMAGE_MB" ] || { echo "Image is over ${MAX_IMAGE_MB} MB"; exit 1; }
+          case "$USER_ID" in ""|0|root|0:*|root:*) echo "Image runs as root"; exit 1;; esac
+
+      - name: Scan - Trivy (report HIGH+CRITICAL, fail on fixable CRITICAL)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.65.0 image --no-progress \
+            --severity HIGH,CRITICAL --format table --exit-code 0 \
+            local/${{ matrix.service }}:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.65.0 image --no-progress --quiet \
+            --severity CRITICAL --ignore-unfixed --exit-code 1 \
+            local/${{ matrix.service }}:ci
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ecommerce-application/services/${{ matrix.service }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+
+  # --------------------------------------------- 5. UPDATE GITOPS CONFIG REPO
+  update-config:
+    name: deploy to staging (bump tag in config repo)
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout config repo (write deploy key scoped to that repo only)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.CONFIG_REPO }}          # Jason2303/atlas-market-gitops
+          ssh-key: ${{ secrets.CONFIG_REPO_DEPLOY_KEY }}
+          ref: main
+
+      - name: Set image tag for staging
+        id: tag
+        run: |
+          TAG="sha-${GITHUB_SHA::7}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          yq -i ".image.tag = \"$TAG\"" envs/staging/values.yaml
+          git diff
+
+      - name: Commit and push (retry on concurrent updates)
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git config user.name  "atlas-ci-bot"
+          git config user.email "atlas-ci-bot@users.noreply.github.com"
+          git add envs/staging/values.yaml
+          if git diff --cached --quiet; then echo "Already at $TAG"; exit 0; fi
+          git commit -m "deploy(staging): atlas-market $TAG" \
+                     -m "Source: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          for i in 1 2 3; do
+            git push origin main && exit 0
+            echo "push rejected, rebasing (attempt $i)"; git pull --rebase origin main
+          done
+          exit 1
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed to staging via GitOps"
+            echo "Tag \`${{ steps.tag.outputs.tag }}\` written to \`envs/staging/values.yaml\` in \`${{ vars.CONFIG_REPO }}\`."
+            echo "ArgoCD auto-syncs **atlas-staging**. Production: run *Promote to production* in the config repo."
+          } >> "$GITHUB_STEP_SUMMARY"

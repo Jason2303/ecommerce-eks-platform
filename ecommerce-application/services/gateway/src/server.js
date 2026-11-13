@@ -6,11 +6,16 @@
 //   /api/health       -> answered here (used for load tests and smoke checks)
 // It also adds a request id to every call and applies a per-client rate limit
 // stored in Redis, so the limit is shared across all gateway replicas.
+// Observability: starts/continues the W3C trace (traceparent) and forwards it to
+// the services behind it, exposes Prometheus metrics on /metrics.
 
 const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
 const Redis = require('ioredis');
+const {
+  client: prom, makeLogger, traceContext, traceparentFor, httpMetrics, metricsHandler, register, NOT_USER_TRAFFIC,
+} = require('./observability');
 
 const SERVICE = 'gateway';
 const VERSION = process.env.APP_VERSION || 'dev';
@@ -21,8 +26,19 @@ const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN ?? 600); // 0 d
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 10000);
 const SHUTDOWN_DELAY_MS = Number(process.env.SHUTDOWN_DELAY_MS || 5000);
 
-const log = (level, msg, extra = {}) =>
-  console.log(JSON.stringify({ time: new Date().toISOString(), level, service: SERVICE, msg, ...extra }));
+const log = makeLogger(SERVICE);
+
+const rateLimited = new prom.Counter({
+  name: 'gateway_rate_limited_requests_total',
+  help: 'Requests rejected with 429 by the per-client rate limit',
+  registers: [register],
+});
+const upstreamErrors = new prom.Counter({
+  name: 'gateway_upstream_errors_total',
+  help: 'Failed calls from the gateway to a backend service',
+  labelNames: ['target', 'kind'],
+  registers: [register],
+});
 
 const redis = new Redis({
   host: process.env.REDIS_HOST || 'redis',
@@ -31,6 +47,7 @@ const redis = new Redis({
   enableOfflineQueue: false,
   maxRetriesPerRequest: 1,
   retryStrategy: (times) => Math.min(times * 200, 2000),
+  lazyConnect: process.env.NODE_ENV === 'test', // unit tests run without Redis
 });
 let redisWasReady = false;
 redis.on('ready', () => { redisWasReady = true; log('info', 'redis connected'); });
@@ -53,6 +70,7 @@ function proxyTo(baseUrl) {
     for (const [k, v] of Object.entries(req.headers)) if (!HOP_BY_HOP.has(k)) headers[k] = v;
     headers.host = target.host;
     headers['x-request-id'] = req.id;
+    headers.traceparent = traceparentFor(req);
     headers['x-forwarded-for'] = req.ip;
 
     const upstream = http.request({
@@ -67,9 +85,10 @@ function proxyTo(baseUrl) {
 
     upstream.on('timeout', () => upstream.destroy(Object.assign(new Error('upstream timeout'), { code: 'ETIMEDOUT' })));
     upstream.on('error', (err) => {
+      const timedOut = err.code === 'ETIMEDOUT';
+      upstreamErrors.inc({ target: target.hostname, kind: timedOut ? 'timeout' : 'unavailable' });
       log('error', 'upstream error', { target: target.host, path, error: err.message, requestId: req.id });
       if (res.headersSent) return res.destroy();
-      const timedOut = err.code === 'ETIMEDOUT';
       res.status(timedOut ? 504 : 502).json({ error: timedOut ? 'upstream_timeout' : 'upstream_unavailable', requestId: req.id });
     });
     req.pipe(upstream);
@@ -88,6 +107,7 @@ async function rateLimit(req, res, next) {
     res.set('X-RateLimit-Remaining', String(Math.max(RATE_LIMIT_PER_MIN - count, 0)));
     if (count > RATE_LIMIT_PER_MIN) {
       res.set('Retry-After', String(60 - (Math.floor(Date.now() / 1000) % 60)));
+      rateLimited.inc();
       return res.status(429).json({ error: 'rate_limited' });
     }
   } catch { /* fail open */ }
@@ -101,17 +121,20 @@ app.set('trust proxy', true);
 
 let shuttingDown = false;
 
+app.use(traceContext);
+app.use(httpMetrics);
 app.use((req, res, next) => {
   req.id = req.get('x-request-id') || crypto.randomUUID();
   res.set('X-Request-Id', req.id);
   const start = Date.now();
   res.on('finish', () => {
-    if (req.path === '/healthz' || req.path === '/readyz') return;
-    log('info', 'request', { method: req.method, path: req.originalUrl, status: res.statusCode, ms: Date.now() - start, requestId: req.id });
+    if (NOT_USER_TRAFFIC.has(req.path)) return;
+    log(res.statusCode >= 500 ? 'error' : 'info', 'request', { method: req.method, path: req.originalUrl, status: res.statusCode, ms: Date.now() - start, requestId: req.id });
   });
   next();
 });
 
+app.get('/metrics', metricsHandler);
 app.get('/healthz', (req, res) => res.json({ status: 'ok', service: SERVICE, version: VERSION }));
 app.get('/readyz', (req, res) => {
   if (shuttingDown) return res.status(503).json({ status: 'shutting_down' });
@@ -125,22 +148,28 @@ app.use('/api/orders', rateLimit, proxyTo(ORDER_SERVICE_URL));
 
 app.use((req, res) => res.status(404).json({ error: 'not_found' }));
 
-const server = app.listen(PORT, () =>
-  log('info', 'listening', { port: PORT, version: VERSION, products: PRODUCT_SERVICE_URL, orders: ORDER_SERVICE_URL, rateLimitPerMin: RATE_LIMIT_PER_MIN }));
+function startServer() {
+  const server = app.listen(PORT, () =>
+    log('info', 'listening', { port: PORT, version: VERSION, products: PRODUCT_SERVICE_URL, orders: ORDER_SERVICE_URL, rateLimitPerMin: RATE_LIMIT_PER_MIN }));
 
-const shutdown = (signal) => {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  log('info', 'shutdown started', { signal, delayMs: SHUTDOWN_DELAY_MS });
-  setTimeout(() => {
-    server.close(() => {
-      redis.disconnect();
-      log('info', 'shutdown complete');
-      process.exit(0);
-    });
-    server.closeIdleConnections();
-    setTimeout(() => process.exit(1), 10000).unref();
-  }, SHUTDOWN_DELAY_MS);
-};
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+  const shutdown = (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log('info', 'shutdown started', { signal, delayMs: SHUTDOWN_DELAY_MS });
+    setTimeout(() => {
+      server.close(() => {
+        redis.disconnect();
+        log('info', 'shutdown complete');
+        process.exit(0);
+      });
+      server.closeIdleConnections();
+      setTimeout(() => process.exit(1), 10000).unref();
+    }, SHUTDOWN_DELAY_MS);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}
+
+if (require.main === module) startServer();
+
+module.exports = { app, redis };
